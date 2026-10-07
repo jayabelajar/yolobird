@@ -1,179 +1,337 @@
-# Deteksi & Hitung Jumlah Burung dengan YOLO + Streamlit
+# YOLO Bird Detection
 
-Aplikasi web (Streamlit) untuk mendeteksi burung (termasuk ayam) pada sebuah
-gambar dan menghitung jumlahnya, menggunakan model object detection YOLO
-(Ultralytics).
+Deteksi dan hitung jumlah burung dari gambar menggunakan YOLOv8. Project ini menyediakan dua interface yang berjalan terpisah:
 
-## Dataset & model
+- Web app Streamlit untuk penggunaan interaktif.
+- REST API FastAPI untuk integrasi mobile, termasuk Flutter.
 
-Model utama (`models/best.pt`) adalah YOLOv8n yang di-fine-tune dengan dataset
-Kaggle [Birds Images Dataset](https://www.kaggle.com/datasets/stealthtechnologies/birds-images-dataset)
-(187 foto burung: burung hantu, angsa, kakatua, elang, camar, kolibri, dll).
+Model utama menggunakan `models/best.pt`, yaitu YOLOv8n yang sudah di-fine-tune untuk kelas burung. Jika model custom tidak tersedia, sistem otomatis fallback ke `models/yolov8n.pt` dan hanya menghitung kelas `bird` dari COCO.
 
-Dataset tersebut **tidak menyertakan anotasi bounding box** (hanya foto), jadi
-`prepare_birds_dataset.py` membuat labelnya secara otomatis (*auto-labeling*)
-memakai model open-vocabulary **YOLO-World** (`yolov8s-world.pt`) dengan prompt
-`"bird"`. Gambar yang sama sekali tidak terdeteksi burung dilewati. Hasilnya
-satu kelas: `burung`.
+## Fitur
 
-Hasil training (50 epoch, CPU, dievaluasi pada 35 gambar validasi yang
-labelnya juga hasil auto-label):
+- Upload gambar burung melalui Streamlit.
+- Deteksi burung dengan confidence threshold yang dapat diatur.
+- Hitung jumlah burung terdeteksi.
+- Tampilkan confidence setiap deteksi.
+- Hasil gambar dengan bounding box.
+- REST API untuk upload gambar dari aplikasi mobile.
+- Endpoint health check untuk monitoring server.
+- Dokumentasi Swagger otomatis dari FastAPI.
 
-| Model | Precision | Recall | mAP50 | mAP50-95 |
-|---|---|---|---|---|
-| `yolov8n.pt` COCO (kelas *bird*, sebelum) | 0.819 | 0.708 | 0.815 | 0.691 |
-| `best.pt` fine-tune dataset Kaggle (sesudah) | **0.900** | **0.829** | **0.872** | **0.729** |
+## Tech Stack
 
-Aplikasi memilih model secara otomatis:
+| Komponen | Teknologi |
+|---|---|
+| Object Detection | YOLOv8 / Ultralytics |
+| Web App | Streamlit |
+| REST API | FastAPI |
+| API Server | Uvicorn |
+| Image Processing | OpenCV, Pillow, NumPy |
+| Model Custom | `models/best.pt` |
 
-- Jika `models/best.pt` **ada** -> aplikasi memakai model custom itu dan
-  menghitung semua deteksi sebagai burung.
-- Jika `models/best.pt` **belum ada** -> aplikasi fallback ke model pretrained
-  `yolov8n.pt` (COCO) dan hanya mengambil deteksi kelas **"bird"**.
+## Struktur Project
 
-### Keterbatasan
-
-- Label dibuat otomatis, bukan dianotasi manual, sehingga ada kesalahan label
-  (terutama burung yang sangat kecil/tertutup di foto kawanan). Metrik di atas
-  juga diukur terhadap label otomatis tersebut.
-- Foto di dataset Kaggle kebanyakan close-up satu/beberapa burung. Untuk scene
-  yang sangat berbeda, seperti kerumunan padat ayam di kandang
-  (`data/samples/chicken_frame_...jpg`), model masih kesulitan. Untuk kasus itu
-  tambahkan gambar ayam berlabel sendiri ke `data/images` & `data/labels`
-  (kelas `0`) lalu latih ulang.
-
-## Struktur project
-
-```
+```text
 yoloobj_detect/
-├── app.py                    # Aplikasi Streamlit (UI upload gambar, tampilkan hasil)
-├── detector.py               # Wrapper model YOLO: pilih model, jalankan deteksi, hitung burung
-├── prepare_birds_dataset.py  # Unduh dataset Kaggle + auto-label YOLO-World + split train/val
-├── train.py                  # Script training model YOLO custom dari dataset di data/
-├── requirements.txt          # Dependency Python untuk aplikasi
-├── requirements-train.txt    # Dependency tambahan untuk persiapan dataset & training
-├── packages.txt              # Dependency sistem (apt) untuk Streamlit Community Cloud
-├── models/
-│   ├── yolov8n.pt            # Model pretrained COCO (fallback & bobot awal training)
-│   └── best.pt               # Model custom kelas "burung" hasil train.py
-└── data/
-    ├── data.yaml             # Konfigurasi dataset YOLO (path, nama kelas)
-    ├── images/train, images/val   # Gambar training/validasi (dibuat prepare_birds_dataset.py)
-    ├── labels/train, labels/val   # Label YOLO .txt (dibuat prepare_birds_dataset.py)
-    └── samples/              # Gambar contoh untuk dicoba langsung di aplikasi
+|-- app.py                    # Web app Streamlit
+|-- api.py                    # REST API FastAPI
+|-- detector.py               # Wrapper model YOLO dan logic deteksi
+|-- prepare_birds_dataset.py  # Persiapan dataset dan auto-labeling
+|-- train.py                  # Training YOLO custom
+|-- requirements.txt          # Dependency Streamlit app
+|-- requirements-api.txt      # Dependency REST API
+|-- requirements-train.txt    # Dependency training
+|-- packages.txt              # Dependency system untuk deployment
+|-- api_results/              # Output gambar hasil deteksi API
+|-- models/
+|   |-- yolov8n.pt            # Model pretrained fallback
+|   `-- best.pt               # Model custom burung
+|-- data/
+|   |-- data.yaml
+|   `-- samples/              # Gambar contoh
+`-- docs/
+    `-- PRD.MD                # Product Requirements Document
 ```
 
-Gambar & label hasil `prepare_birds_dataset.py` (berawalan `kaggle_`) tidak
-di-commit ke git karena bisa dibuat ulang kapan saja.
+## Cara Kerja
 
-## Fungsi-fungsi utama
+`detector.py` menjadi pusat logic deteksi. Streamlit dan FastAPI sama-sama menggunakan class yang sama:
 
-### `prepare_birds_dataset.py`
+```python
+from detector import BirdDetector
+```
 
-- **`download_dataset()`** — mengunduh dataset Kaggle lewat `kagglehub`
-  (dataset publik, tidak perlu API key) ke cache lokal.
-- **`main()`** — auto-label setiap gambar dengan YOLO-World (`set_classes(["bird"])`,
-  confidence minimum default `0.15` supaya burung di foto kawanan ikut
-  terlabel), menulis label format YOLO (kelas `0`), lalu membagi 80/20 ke
-  train/val secara deterministik (`--seed`). Hasil import sebelumnya
-  (`kaggle_*`) dihapus dulu, jadi aman dijalankan ulang.
-- Argumen CLI: `--source` (folder gambar lokal, lewati download), `--labeler`,
-  `--conf`, `--val-ratio`, `--seed`.
+Method utama:
 
-### `detector.py`
+```python
+annotated_rgb, count, confidences = detector.detect(image_bgr, confidence)
+```
 
-- **`BirdDetector.__init__`** — memutuskan model mana yang dipakai: cek
-  apakah `models/best.pt` ada. Kalau ada, load sebagai model custom (semua
-  kelasnya dianggap burung). Kalau tidak, load `models/yolov8n.pt` dan cari
-  id kelas `"bird"` dari `model.names` untuk dipakai sebagai filter.
-- **`BirdDetector.label`** — teks singkat untuk ditampilkan di UI, menandakan
-  model mana yang sedang aktif.
-- **`BirdDetector.detect(image_bgr, conf)`** — inti deteksi:
-  1. Menjalankan `model.predict()` pada gambar (array numpy, urutan channel
-     **BGR**, sesuai konvensi OpenCV yang dipakai Ultralytics secara internal).
-  2. Jika sedang pakai model pretrained, buang deteksi yang bukan kelas
-     `"bird"` lewat `result.boxes = result.boxes[keep_idx]`.
-  3. Membuat gambar hasil anotasi (`result.plot()`) dan mengonversinya ke RGB.
-  4. Mengembalikan `(gambar_beranotasi, jumlah_deteksi, daftar_confidence)`.
+Dengan pendekatan ini, logic YOLO tidak diduplikasi. Web app dan API hanya menjadi interface untuk model yang sama.
 
-### `app.py`
+## Menjalankan Streamlit App
 
-- **`load_detector()`** — membuat satu instance `BirdDetector` dan
-  meng-cache-nya (`st.cache_resource`) supaya model YOLO hanya di-load sekali.
-- **`pil_to_bgr(image)`** — mengonversi gambar yang diunggah user (PIL, RGB)
-  menjadi array numpy BGR untuk `BirdDetector.detect()`.
-- **`rgb_array_to_png_bytes(rgb_array)`** — mengonversi gambar hasil deteksi
-  menjadi bytes PNG, dipakai untuk tombol unduh.
-- **`main()`** — merangkai UI:
-  - Sidebar: slider *confidence threshold*, info model yang aktif dan sumber
-    dataset-nya.
-  - Input gambar: upload file, atau pilih salah satu gambar contoh dari
-    `data/samples/`.
-  - Menampilkan gambar asli vs. hasil deteksi, metric jumlah burung, rincian
-    confidence tiap deteksi, dan tombol unduh gambar hasil deteksi.
-
-### `train.py`
-
-- **`main()`** — memvalidasi bahwa `data/images/train` dan `data/images/val`
-  sudah berisi gambar, lalu menjalankan `YOLO(...).train()` dengan
-  konfigurasi dari `data/data.yaml`. Bobot terbaik disalin ke
-  `models/best.pt`, sehingga `app.py` langsung memakainya.
-- Parameter CLI: `--model` (default `models/yolov8n.pt`), `--epochs`,
-  `--imgsz`, `--batch`, `--device` (mis. `--device 0` untuk GPU, `--device cpu`).
-- Opsi hemat panas: `--threads` (batas thread CPU), `--workers` (proses
-  dataloader), `--cooldown` (jeda detik tiap epoch), dan `--resume` untuk
-  melanjutkan training yang terhenti dari `last.pt`.
-
-## Menjalankan aplikasi secara lokal
+Install dependency:
 
 ```bash
 pip install -r requirements.txt
+```
+
+Jalankan aplikasi:
+
+```bash
 streamlit run app.py
 ```
 
-Buka `http://localhost:8501`, unggah gambar berisi burung (atau pilih gambar
-contoh), lalu lihat hasil deteksi dan jumlah burung yang terdeteksi.
+Buka:
 
-## Melatih ulang model
+```text
+http://localhost:8501
+```
+
+## Menjalankan REST API
+
+Install dependency API:
+
+```bash
+pip install -r requirements-api.txt
+```
+
+Jalankan server:
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Buka dokumentasi Swagger:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+Health check:
+
+```text
+http://127.0.0.1:8000/api/health
+```
+
+## Endpoint API
+
+### `GET /`
+
+Memastikan API berjalan.
+
+Response:
+
+```json
+{
+  "message": "Bird Detection API",
+  "status": "running"
+}
+```
+
+### `GET /api/health`
+
+Health check untuk aplikasi mobile atau monitoring.
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "service": "YOLO Bird Detection API"
+}
+```
+
+### `POST /api/detect`
+
+Endpoint utama untuk deteksi burung.
+
+Content-Type:
+
+```text
+multipart/form-data
+```
+
+Parameter:
+
+| Nama | Tipe | Required | Default |
+|---|---|---:|---:|
+| `image` | File | Ya | - |
+| `confidence` | Float | Tidak | `0.50` |
+
+Format gambar yang didukung:
+
+- `.jpg`
+- `.jpeg`
+- `.png`
+
+Contoh response:
+
+```json
+{
+  "success": true,
+  "count": 3,
+  "confidence_threshold": 0.5,
+  "confidences": [0.94, 0.91, 0.87],
+  "average_confidence": 0.9067,
+  "result_image": "/api/results/abc123.png"
+}
+```
+
+### `GET /api/results/{filename}`
+
+Mengambil gambar hasil deteksi yang sudah memiliki bounding box.
+
+Contoh:
+
+```text
+http://127.0.0.1:8000/api/results/abc123.png
+```
+
+## Integrasi Flutter
+
+Saat development, jalankan API dengan host `0.0.0.0` agar dapat diakses dari perangkat lain dalam jaringan yang sama:
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Gunakan IP laptop dari aplikasi mobile:
+
+```text
+http://IP-LAPTOP:8000/api/detect
+```
+
+Contoh:
+
+```text
+http://192.168.1.10:8000/api/detect
+```
+
+Pastikan laptop dan perangkat mobile berada di jaringan Wi-Fi/LAN yang sama.
+
+## Error Response API
+
+Confidence tidak valid:
+
+```json
+{
+  "success": false,
+  "detail": "Confidence must be between 0 and 1"
+}
+```
+
+Format file tidak didukung:
+
+```json
+{
+  "success": false,
+  "detail": "Unsupported image format"
+}
+```
+
+Gambar rusak atau tidak valid:
+
+```json
+{
+  "success": false,
+  "detail": "Invalid image"
+}
+```
+
+Error inference:
+
+```json
+{
+  "success": false,
+  "detail": "Detection failed"
+}
+```
+
+## Dataset dan Model
+
+Model custom `models/best.pt` dibuat dari dataset Kaggle Birds Images Dataset. Dataset awal tidak menyediakan anotasi bounding box, sehingga `prepare_birds_dataset.py` menggunakan YOLO-World untuk auto-labeling dengan prompt `bird`.
+
+Hasil training menggunakan YOLOv8n:
+
+| Model | Precision | Recall | mAP50 | mAP50-95 |
+|---|---:|---:|---:|---:|
+| `yolov8n.pt` COCO | 0.819 | 0.708 | 0.815 | 0.691 |
+| `best.pt` custom | 0.900 | 0.829 | 0.872 | 0.729 |
+
+Catatan:
+
+- Metrik diukur terhadap label otomatis, bukan anotasi manual.
+- Untuk skenario ayam atau kawanan padat, akurasi dapat ditingkatkan dengan menambahkan data berlabel manual lalu training ulang.
+
+## Training Ulang
+
+Install dependency training:
 
 ```bash
 pip install -r requirements-train.txt
-python prepare_birds_dataset.py          # unduh dataset Kaggle + auto-label + split
-python train.py --epochs 50 --batch 8    # tambahkan --device 0 jika punya GPU CUDA
 ```
 
-Supaya laptop tidak terlalu panas saat training di CPU, pakai mode hemat
-(lebih lambat, tapi beban CPU jauh lebih ringan):
+Siapkan dataset dan label:
+
+```bash
+python prepare_birds_dataset.py
+```
+
+Training:
+
+```bash
+python train.py --epochs 50 --batch 8
+```
+
+Jika menggunakan GPU CUDA:
+
+```bash
+python train.py --epochs 50 --batch 8 --device 0
+```
+
+Mode CPU yang lebih ringan:
 
 ```bash
 python train.py --epochs 50 --batch 8 --threads 2 --workers 0 --cooldown 30
-# training terhenti? lanjutkan dari checkpoint terakhir:
-python train.py --resume runs/burung_yolo/weights/last.pt --threads 2 --workers 0 --cooldown 30
 ```
 
-`models/best.pt` otomatis diperbarui dan dipakai oleh `app.py` pada run
-berikutnya. Untuk meningkatkan akurasi pada ayam, tambahkan gambar ayam
-berlabel (format YOLO, kelas `0`, nama file bebas selain awalan `kaggle_`) ke
-`data/images/{train,val}` dan `data/labels/{train,val}` sebelum training.
+Checkpoint terbaik akan disalin ke:
 
-## Deploy ke Streamlit Community Cloud
+```text
+models/best.pt
+```
 
-1. Push folder project ini ke sebuah repo GitHub (`app.py`, `detector.py`,
-   `requirements.txt`, `packages.txt`, `models/`, `data/samples/`, dst).
-2. Buka [share.streamlit.io](https://share.streamlit.io), hubungkan ke repo
-   tersebut, dan set **Main file path**: `app.py`.
-3. Streamlit Cloud otomatis membaca `requirements.txt` dan `packages.txt`
-   (dependency sistem OpenCV/Ultralytics di Linux, seperti `libgl1`).
+## Deployment
 
-> `models/best.pt` dan `models/yolov8n.pt` di-commit ke repo supaya deploy
-> tidak bergantung pada training atau koneksi internet saat runtime.
+### Streamlit Community Cloud
 
-## Catatan konversi warna (BGR vs RGB)
+1. Push repository ke GitHub.
+2. Buka Streamlit Community Cloud.
+3. Pilih repository.
+4. Set main file path ke `app.py`.
+5. Deploy.
 
-Ultralytics YOLO menganggap input array numpy memakai urutan channel **BGR**
-(konvensi OpenCV) dan mengonversinya ke RGB secara internal sebelum masuk ke
-model. Karena gambar yang diunggah lewat Streamlit berasal dari PIL (RGB),
-`app.py` sengaja membalik urutan channel-nya (`pil_to_bgr`) sebelum dikirim ke
-`detector.detect()`, dan `detector.py` membalik lagi hasil `result.plot()`
-(BGR) menjadi RGB sebelum ditampilkan. Tanpa konversi ini, akurasi deteksi
-model bisa menurun karena channel warna yang diterima terbalik.
+### REST API
+
+API dapat dijalankan di VPS, server lokal, atau environment Python lain yang mendukung FastAPI dan Uvicorn:
+
+```bash
+pip install -r requirements-api.txt
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+Untuk production, jalankan di belakang reverse proxy seperti Nginx dan nonaktifkan `--reload`.
+
+## Catatan Teknis
+
+- Input ke `BirdDetector.detect()` menggunakan format OpenCV BGR.
+- Output anotasi dikembalikan sebagai RGB array.
+- FastAPI menyimpan gambar hasil deteksi ke folder `api_results/`.
+- Instance `BirdDetector` pada API dibuat satu kali saat server start agar model tidak dimuat ulang pada setiap request.
+- File original seperti `app.py`, `detector.py`, model, dataset, dan script training tetap dapat digunakan secara independen.
+
+## Lisensi
+
+Project ini mengikuti lisensi pada file `LICENSE`.
